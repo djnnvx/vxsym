@@ -164,11 +164,20 @@ const ACCOUNT_ROUTINES: &[(&str, &str)] = &[
     ("loginUserAdd", "default login user table routine present"),
     ("loginUserDelete", "login user management routine present"),
     ("loginUserVerify", "login credential check routine present"),
-    ("loginDefaultEncrypt", "built-in default password hash routine present"),
-    ("loginEncryptInstall", "custom login hash hook routine present"),
+    (
+        "loginDefaultEncrypt",
+        "built-in default password hash routine present",
+    ),
+    (
+        "loginEncryptInstall",
+        "custom login hash hook routine present",
+    ),
     ("loginInit", "login facility initialization routine present"),
     ("loginPrompt", "interactive login prompt routine present"),
-    ("shellLoginInstall", "shell login enforcement routine present"),
+    (
+        "shellLoginInstall",
+        "shell login enforcement routine present",
+    ),
 ];
 
 const SERVICE_SYMBOLS: &[(&str, &str)] = &[
@@ -236,6 +245,41 @@ fn name_at(data: &[u8], off: usize) -> Option<&str> {
     None
 }
 
+struct NameStarts {
+    bits: Vec<u64>,
+    offsets: Vec<usize>,
+}
+
+impl NameStarts {
+    fn build(data: &[u8]) -> Self {
+        let n = data.len();
+        let mut bits = vec![0u64; n / 64 + 1];
+        let mut offsets = Vec::new();
+        let mut run = 0usize;
+        let mut term = 0xffu8;
+        for i in (0..n).rev() {
+            let b = data[i];
+            if (0x21..=0x7e).contains(&b) {
+                run = (run + 1).min(MAX_NAME + 1);
+            } else {
+                run = 0;
+                term = b;
+            }
+            if (b.is_ascii_alphabetic() || b == b'_') && (1..=MAX_NAME).contains(&run) && term == 0
+            {
+                bits[i >> 6] |= 1u64 << (i & 63);
+                offsets.push(i);
+            }
+        }
+        offsets.reverse();
+        Self { bits, offsets }
+    }
+
+    fn has(&self, off: usize) -> bool {
+        (self.bits[off >> 6] >> (off & 63)) & 1 == 1
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Region {
     start: usize,
@@ -291,7 +335,15 @@ fn structural_regions(data: &[u8], endian: Endian, layout: &Layout) -> Vec<Regio
     regions
 }
 
-fn find_load_base(data: &[u8], endian: Endian, layout: &Layout, region: &Region) -> Option<u64> {
+const MAX_BASE_VOTES: usize = 200_000;
+
+fn find_load_base(
+    data: &[u8],
+    endian: Endian,
+    layout: &Layout,
+    region: &Region,
+    starts: &NameStarts,
+) -> Option<u64> {
     let es = layout.entry_size;
     let ps = layout.ptr_size;
     let w = region.run.min(WINDOW);
@@ -304,35 +356,39 @@ fn find_load_base(data: &[u8], endian: Endian, layout: &Layout, region: &Region)
         let o = region.start + i * es;
         ptrs.push(read_ptr(data, o + layout.name_off, ps, endian)?);
     }
-    let p0 = ptrs[0];
+    let p0 = ptrs[0] as i128;
+    let d = ptrs[1] as i128 - p0;
     let need = ((w * 3) / 4).max(8);
+    let n = data.len() as i128;
 
     let mut best_o0: Option<usize> = None;
     let mut best_score = 0usize;
+    let mut votes = 0usize;
 
-    for o0 in 0..data.len() {
-        let c = data[o0];
-        if !(c.is_ascii_alphabetic() || c == b'_') {
+    for &s in &starts.offsets {
+        let s128 = s as i128;
+        if s128 > p0 {
+            break;
+        }
+        let oi1 = s128 + d;
+        if oi1 < 0 || oi1 >= n || !starts.has(oi1 as usize) {
             continue;
         }
-        let l = p0 as i128 - o0 as i128;
-        if l < 0 {
-            continue;
+        votes += 1;
+        if votes > MAX_BASE_VOTES {
+            break;
         }
-        let oi1 = ptrs[1] as i128 - l;
-        if oi1 < 0 || oi1 as u128 >= data.len() as u128 || name_at(data, oi1 as usize).is_none() {
-            continue;
-        }
+        let l = p0 - s128;
         let mut score = 0usize;
         for &p in &ptrs {
             let oi = p as i128 - l;
-            if oi >= 0 && (oi as u128) < data.len() as u128 && name_at(data, oi as usize).is_some() {
+            if oi >= 0 && oi < n && starts.has(oi as usize) {
                 score += 1;
             }
         }
         if score > best_score {
             best_score = score;
-            best_o0 = Some(o0);
+            best_o0 = Some(s);
             if score == w {
                 break;
             }
@@ -340,8 +396,7 @@ fn find_load_base(data: &[u8], endian: Endian, layout: &Layout, region: &Region)
     }
 
     if best_score >= need {
-        let o0 = best_o0?;
-        Some((p0 as i128 - o0 as i128) as u64)
+        Some((p0 - best_o0? as i128) as u64)
     } else {
         None
     }
@@ -455,12 +510,13 @@ fn build_output(endian: Endian, layout: &Layout, load_base: u64, symbols: Vec<Sy
 }
 
 pub fn analyze(data: &[u8]) -> Output {
+    let starts = NameStarts::build(data);
     let mut best: Option<(usize, Endian, &Layout, u64, Vec<Symbol>)> = None;
 
     for &endian in &[Endian::Little, Endian::Big] {
         for layout in LAYOUTS {
             for region in structural_regions(data, endian, layout) {
-                let load_base = match find_load_base(data, endian, layout, &region) {
+                let load_base = match find_load_base(data, endian, layout, &region, &starts) {
                     Some(b) => b,
                     None => continue,
                 };

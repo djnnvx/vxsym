@@ -57,7 +57,7 @@ fn build_image(
         img.push(0);
     }
 
-    while img.len() % 8 != 0 {
+    while !img.len().is_multiple_of(8) {
         img.push(0);
     }
 
@@ -67,8 +67,20 @@ fn build_image(
     for (i, s) in syms.iter().enumerate() {
         let base = table_off + i * layout.entry_size;
         let name_ptr = load_base + name_off[i] as u64;
-        write_ptr(&mut img, base + layout.name_off, name_ptr, layout.ptr_size, endian);
-        write_ptr(&mut img, base + layout.value_off, s.value, layout.ptr_size, endian);
+        write_ptr(
+            &mut img,
+            base + layout.name_off,
+            name_ptr,
+            layout.ptr_size,
+            endian,
+        );
+        write_ptr(
+            &mut img,
+            base + layout.value_off,
+            s.value,
+            layout.ptr_size,
+            endian,
+        );
         img[base + layout.type_off] = s.type_byte;
     }
 
@@ -81,7 +93,13 @@ fn filler(count: usize) -> Vec<Sym> {
         .collect()
 }
 
-fn assert_roundtrip(endian: Endian, layout_name: &str, load_base: u64, lead_pad: usize, syms: &[Sym]) {
+fn assert_roundtrip(
+    endian: Endian,
+    layout_name: &str,
+    load_base: u64,
+    lead_pad: usize,
+    syms: &[Sym],
+) {
     let layout = layout_by_name(layout_name).unwrap();
     let img = build_image(endian, layout, load_base, lead_pad, syms);
     let out = analyze(&img);
@@ -164,16 +182,16 @@ fn recovers_with_leading_padding() {
 #[test]
 fn type_letters_match_nm() {
     let syms = vec![
-        sym("absLocal", 0x10, 0x02),  // a
-        sym("absGlobal", 0x11, 0x03), // A
-        sym("textLocal", 0x12, 0x04), // t
-        sym("textGlobal", 0x13, 0x05),// T
-        sym("dataLocal", 0x14, 0x06), // d
-        sym("dataGlobal", 0x15, 0x07),// D
-        sym("bssLocal", 0x16, 0x08),  // b
-        sym("bssGlobal", 0x17, 0x09), // B
-        sym("commLocal", 0x18, 0x0a), // c
-        sym("commGlobal", 0x19, 0x0b),// C
+        sym("absLocal", 0x10, 0x02),   // a
+        sym("absGlobal", 0x11, 0x03),  // A
+        sym("textLocal", 0x12, 0x04),  // t
+        sym("textGlobal", 0x13, 0x05), // T
+        sym("dataLocal", 0x14, 0x06),  // d
+        sym("dataGlobal", 0x15, 0x07), // D
+        sym("bssLocal", 0x16, 0x08),   // b
+        sym("bssGlobal", 0x17, 0x09),  // B
+        sym("commLocal", 0x18, 0x0a),  // c
+        sym("commGlobal", 0x19, 0x0b), // C
     ];
     let mut all = syms;
     all.extend(filler(30));
@@ -181,8 +199,14 @@ fn type_letters_match_nm() {
     let img = build_image(Endian::Little, layout, 0x10000, 0, &all);
     let out = analyze(&img);
 
-    let letters: Vec<&str> = out.symbols[..10].iter().map(|s| s.sym_type.as_str()).collect();
-    assert_eq!(letters, vec!["a", "A", "t", "T", "d", "D", "b", "B", "c", "C"]);
+    let letters: Vec<&str> = out.symbols[..10]
+        .iter()
+        .map(|s| s.sym_type.as_str())
+        .collect();
+    assert_eq!(
+        letters,
+        vec!["a", "A", "t", "T", "d", "D", "b", "B", "c", "C"]
+    );
 }
 
 #[test]
@@ -324,7 +348,13 @@ fn garbage_prefix_then_table_still_found() {
     // A block of invalid bytes before the real table must not stop recovery.
     let layout = layout_by_name("vx5").unwrap();
     let mut img = vec![0u8; 0]; // built below with lead_pad noise
-    img.extend(build_image(Endian::Little, layout, 0x40000, 4096, &filler(40)));
+    img.extend(build_image(
+        Endian::Little,
+        layout,
+        0x40000,
+        4096,
+        &filler(40),
+    ));
     let out = analyze(&img);
     assert_eq!(out.load_address.as_deref(), Some("0x40000"));
     assert_eq!(out.symbol_count, 40);
